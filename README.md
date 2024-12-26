@@ -32,7 +32,7 @@ This repository contains the code and report for analyzing a dataset of 18 quest
    - `ega_network.png`: EGA network visualization showing item clusters.
 
 ### Data:
-- The dataset used in this analysis was sourced from a publicly available GitHub repository:
+- The dataset used in this analysis was sourced from my GitHub repository:
   - `cleaned_perfectionism_data.csv`
 
 ---
