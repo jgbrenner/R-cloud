@@ -1,26 +1,48 @@
-# --------------------------------------------------
-# 1. Install and Load Required Packages
-# --------------------------------------------------
-install.packages(
-  c("semPlot", "lavaan", "readr", 
-    "psych", "qgraph", "GPArotation", "EGAnet"),
-  dependencies = TRUE
+renv::init()
+renv::status()
+
+###############################################################################
+# 0. MINIMAL INSTALLATION SECTION
+###############################################################################
+
+# Define packages you need:
+packages_needed <- c(
+  "lavaan",       # For CFA
+  "readr",        # For reading CSV
+  "psych",        # EFA + psychometrics
+  "qgraph",       # Graphs for EFA/EGA
+  "GPArotation",  # Factor rotations (varimax, etc.)
+  "EGAnet",       # EGA + bootEGA
+  "semPlot",      # For semPaths (CFA diagrams)
+  "ggplot2",      # Optional for extra visuals
+  "dplyr",        # Data manipulation
+  "reshape2"      # Data reshaping
 )
 
-library(readr)
-library(lavaan)
-library(semPlot)
-library(psych)
-library(qgraph)
-library(GPArotation)
-library(EGAnet)
+# 1. Check what's already installed to avoid re-installs
+installed_pkgs <- installed.packages()[, "Package"]
+to_install <- setdiff(packages_needed, installed_pkgs)
 
-# --------------------------------------------------
-# 2. Import and Prepare Data
-# --------------------------------------------------
+if (length(to_install) > 0) {
+  message("\nInstalling only minimal dependencies on Windows:\n")
+  print(to_install)
+  # Use minimal dependencies (Depends, Imports):
+  install.packages(to_install, dependencies = c("Depends","Imports"))
+} else {
+  message("All required packages already installed.")
+}
+
+# Load everything
+invisible(lapply(packages_needed, require, character.only = TRUE))
+
+###############################################################################
+# 1. LOAD AND PREPARE DATA
+###############################################################################
+# CSV import from GitHub
 github_url <- "https://raw.githubusercontent.com/jgbrenner/EGA/refs/heads/main/cleaned_perfectionism_data.csv"
-data <- read_csv(github_url)
+data_raw <- read_csv(github_url)
 
+# Re-label columns for convenience
 question_columns <- c(
   "1. Czuję, że muszę być doskonały we wszystkim, co robię.",
   "2. Gdy nie osiągam swoich wysokich standardów, czuję się zawiedziony/a.",
@@ -42,21 +64,68 @@ question_columns <- c(
   "18. Myślę o tym, co inni sądzą o moich osiągnięciach."
 )
 
-data_cfa <- data[, question_columns]
+data_cfa <- data_raw[, question_columns]
 colnames(data_cfa) <- paste0("Q", 1:18)
 
-# --------------------------------------------------
-# 3. Confirmatory Factor Analysis (CFA)
-# --------------------------------------------------
+###############################################################################
+# 2. FULL ANALYSIS (WITH Q5)
+###############################################################################
+cat("\n=========================\nFULL ANALYSIS (with Q5)\n=========================\n")
+
+# Updated EFA (Promax) Analysis and Circular Plot
+
+cat("\n--- Parallel Analysis (with Q5) ---\n")
+fa.parallel(data_cfa, fa = "fa", fm = "ml", n.iter = 100)
+
+cat("\n--- Scree Plot (with Q5) ---\n")
+scree(data_cfa, factors = TRUE, pc = FALSE, main = "Scree Plot (with Q5)")
+
+cat("\n--- EFA (Promax) with Q5 ---\n")
+efa_promax <- fa(data_cfa, nfactors = 3, rotate = "promax", fm = "ml")
+efa_loadings_matrix <- as.matrix(efa_promax$loadings)
+
+# Replace NA with 0
+efa_loadings_matrix[is.na(efa_loadings_matrix)] <- 0
+
+# Filter loadings below 0.3 for clarity
+filtered_loadings <- efa_loadings_matrix
+filtered_loadings[abs(filtered_loadings) < 0.3] <- 0
+
+# Define item labels and groups
+item_labels <- paste0("Q", 1:18)
+groups <- list("ML1" = 1:6, "ML2" = 7:12, "ML3" = 13:18)
+
+# Set plot parameters
+options(repr.plot.width = 22, repr.plot.height = 15)  # Adjust canvas size
+
+# Plot EFA loadings using the preferred style
+qgraph(
+  filtered_loadings,
+  layout = "circle",                 # Use the circle layout
+  vsize = 6,                         # Node size
+  labels = item_labels,              # Use Q1–Q18 as labels
+  edge.width = abs(filtered_loadings) * 1.5,  # Scale edge widths
+  edge.color = "black",              # Edge color
+  edge.labels = TRUE,                # Show edge labels
+  label.cex = 1.5,                   # Adjust label size
+  repulsion = TRUE,                  # Enable repulsion for readability
+  borders = TRUE,                    # Add borders for clarity
+  groups = groups,                   # Define groups for factors
+  color = c("lightblue", "lightgreen", "lightpink")  # Different colors for factors
+)
+
+
+## 2C. CFA (with Q5)
+cat("\n--- CFA (with Q5) ---\n")
 cfa_model <- '
   PSS =~ Q1 + Q2 + Q3 + Q4 + Q5 + Q6
   PSI =~ Q7 + Q8 + Q9 + Q10 + Q11 + Q12
   PSP =~ Q13 + Q14 + Q15 + Q16 + Q17 + Q18
 '
-
 fit <- cfa(cfa_model, data = data_cfa)
 summary(fit, fit.measures = TRUE, standardized = TRUE)
 
+# CFA path diagram
 semPaths(
   fit,
   what = "std",
@@ -70,137 +139,152 @@ semPaths(
   rotation = 3
 )
 
-# --------------------------------------------------
-# 4. Exploratory Factor Analysis (EFA)
-# --------------------------------------------------
-# (a) EFA with oblimin rotation
-efa_result_oblimin <- fa(data_cfa, nfactors = 3, rotate = "oblimin", fm = "ml")
-print(efa_result_oblimin$loadings, cutoff = 0.3)
-
-# (b) EFA with promax rotation
-efa_result_promax <- fa(data_cfa, nfactors = 3, rotate = "promax", fm = "ml")
-print(efa_result_promax$loadings, cutoff = 0.3)
-
-# Scree plot (parallel analysis)
-fa.parallel(data_cfa, fa = "fa", fm = "ml", n.iter = 100)
-
-# --------------------------------------------------
-# 5. Bootstrapped Exploratory Graph Analysis (bootEGA)
-# --------------------------------------------------
-set.seed(123)  # For reproducibility
-boot_result <- bootEGA(
+## 2D. EGA (with Q5, walktrap)
+cat("\n--- EGA (with Q5, walktrap) ---\n")
+ega_result <- EGA(
   data = data_cfa,
-  iter = 1000,
-  type = "parametric",
-  ncores = 1,  
-  seed = 123
+  model = "glasso",
+  algorithm = "walktrap", 
+  plot.EGA = FALSE
 )
-print(boot_result)
-print(boot_result$boot.ndim)      
-print(boot_result$summary.table)  
-print(boot_result$frequency)      
+print(ega_result)
+plot(ega_result, plot.type = "qgraph", title = "EGA Network (with Q5)", legend = TRUE)
 
-# Re-run with typicalStructure enabled for median structure
+## 2E. bootEGA (with Q5, walktrap)
+cat("\n--- bootEGA (with Q5, walktrap) ---\n")
 set.seed(123)
-boot_result_with_structure <- bootEGA(
+boot_ega_result <- bootEGA(
   data = data_cfa,
   iter = 1000,
   type = "parametric",
   ncores = 1,
+  seed = 123,
   typicalStructure = TRUE,
-  seed = 123
+  algorithm = "walktrap"
 )
+print(boot_ega_result)
+cat("\n--- bootEGA Dimensions (with Q5) ---\n")
+print(boot_ega_result$boot.ndim)
+cat("\n--- bootEGA Summary Table (with Q5) ---\n")
+print(boot_ega_result$summary.table)
+cat("\n--- bootEGA Dimension Frequency (with Q5) ---\n")
+print(boot_ega_result$frequency)
 
-print(boot_result_with_structure$typicalStructure)
-# Optional: plot of the typical structure
-if (!is.null(boot_result_with_structure$typicalStructure)) {
-  plot(boot_result_with_structure, type = "typical")
+if(!is.null(boot_ega_result$typicalStructure)) {
+  plot(boot_ega_result, type = "typical", title = "Typical Structure (with Q5)")
 }
 
-# --------------------------------------------------
-# 6. Q5-Specific Analyses
-# --------------------------------------------------
-# Extract Q5 loadings from EFA (promax)
-efa_loadings <- efa_result_promax$loadings
-q5_loadings <- efa_loadings["Q5", ]
-cat("\nPromax Loadings for Q5:\n")
-print(q5_loadings)
+###############################################################################
+# 3. ANALYSIS WITHOUT Q5
+###############################################################################
+cat("\n===========================\nANALYSIS WITHOUT Q5\n===========================\n")
 
-# Bootstrap membership for Q5 ("V05" in bootEGA)
-q5_membership <- boot_result_with_structure$boot.wc[, "V05"]
-cat("\nBootstrap Factor Assignments for Q5:\n")
-print(table(q5_membership))
+## 3A. Remove Q5
+data_cfa_noQ5 <- data_cfa[, -5]
 
-# (a) Item-rest correlation
-total_minus_q5 <- rowSums(data_cfa[, -5])
-q5_item_rest_corr <- cor(data_cfa$Q5, total_minus_q5, use = "pairwise.complete.obs")
-cat("\nItem-Rest Correlation for Q5:\n", q5_item_rest_corr, "\n")
+## 3B. EFA (Promax, No Q5)
+cat("\n--- Parallel Analysis (No Q5) ---\n")
+fa.parallel(data_cfa_noQ5, fa = "fa", fm = "ml", n.iter = 100)
 
-# (b) Cronbach’s alpha for PSP with/without Q5 
-psp_items <- data_cfa[, c("Q13", "Q14", "Q15", "Q16", "Q17", "Q18")]
-alpha_with_q5 <- alpha(psp_items)
-alpha_without_q5 <- alpha(psp_items[, -1])  # Example removing Q13
-cat("\nCronbach’s Alpha for PSP items:\n")
-cat("With Q13–Q18: ", alpha_with_q5$total$std.alpha, "\n")
-cat("Without Q13: ", alpha_without_q5$total$std.alpha, "\n")
+cat("\n--- Scree Plot (No Q5) ---\n")
+scree(data_cfa_noQ5, factors = TRUE, pc = FALSE, main = "Scree Plot (No Q5)")
 
-# (c) Dimensional Stability
-dim_stability <- dimensionStability(boot_result_with_structure)
-cat("\nDimension Stability:\n")
-print(dim_stability)
+cat("\n--- EFA (Promax) without Q5 ---\n")
+efa_promax_noQ5 <- fa(data_cfa_noQ5, nfactors = 3, rotate = "promax", fm = "ml")
+print(efa_promax_noQ5$loadings, cutoff = 0.3)
 
-# (d) Correlation of Q5 with items in the PSP factor
-q5_factor_corr <- cor(
-  data_cfa[, c("Q5", "Q13", "Q14", "Q15", "Q16", "Q17", "Q18")],
-  use = "pairwise.complete.obs"
-)
-cat("\nCorrelations Between Q5 and PSP Items:\n")
-print(q5_factor_corr)
+## Plot EFA Loadings in a Circle for No Q5
+cat("\n--- EFA Circular Plot (No Q5) ---\n")
 
-# --------------------------------------------------
-# 7. Optional: Visualize EFA Loadings (Oblimin) in qgraph
-# --------------------------------------------------
-loadings_matrix <- as.matrix(efa_result_oblimin$loadings)
-loadings_matrix[is.na(loadings_matrix)] <- 0
+# Convert EFA loadings to a matrix
+efa_noQ5_mat <- as.matrix(efa_promax_noQ5$loadings)
 
-# Zero out loadings < 0.3 for clarity
-filtered_loadings <- loadings_matrix
-filtered_loadings[abs(filtered_loadings) < 0.3] <- 0
+# Replace NA with 0 for better visualization
+efa_noQ5_mat[is.na(efa_noQ5_mat)] <- 0
+
+# Filter out loadings below 0.3 for clarity
+efa_noQ5_filtered <- efa_noQ5_mat
+efa_noQ5_filtered[abs(efa_noQ5_filtered) < 0.3] <- 0
+
+# Define item labels for better visualization
+item_labels_noQ5 <- paste0("Q", c(1:4, 6:18))  # Excluding Q5
+
+# Adjusted plotting parameters
+options(repr.plot.width = 22, repr.plot.height = 15)  # Adjust canvas size
 
 qgraph(
-  filtered_loadings,
-  layout = "circle",
-  vsize = 6,
-  labels = paste0("Q", 1:18),
-  edge.width = abs(filtered_loadings) * 1.5,
-  edge.color = "black",
-  edge.labels = TRUE,
-  label.cex = 1.2,
-  borders = TRUE,
-  groups = list("ML1" = 1:6, "ML2" = 7:12, "ML3" = 13:18),
-  color = c("lightblue", "lightgreen", "lightpink")
+  efa_noQ5_filtered,
+  layout = "circle",                  # Circle layout for clean visuals
+  vsize = 6,                          # Node size
+  labels = item_labels_noQ5,          # Updated labels excluding Q5
+  edge.width = abs(efa_noQ5_filtered) * 1.5,  # Scaled edge widths
+  edge.color = "black",               # Standard edge color
+  edge.labels = TRUE,                 # Show edge labels
+  label.cex = 1.5,                    # Adjust label size
+  repulsion = TRUE,                   # Add repulsion for better spacing
+  borders = TRUE,                     # Add node borders for clarity
+  groups = list("ML1" = 1:5, "ML2" = 6:11, "ML3" = 12:17),  # Define factor groups
+  color = c("lightblue", "lightgreen", "lightpink"),  # Factor group colors
+  asize = 18                          # Adjust as needed
 )
 
-# Identify any cross-loadings above 0.3
-cross_loadings <- apply(abs(loadings_matrix) > 0.3, 1, sum) > 1
-if (any(cross_loadings)) {
-  cat("\nItems with Cross-Loadings (Loadings > 0.3 on Multiple Factors):\n")
-  print(which(cross_loadings))
-} else {
-  cat("\nNo cross-loadings detected.\n")
+
+## 3C. CFA (No Q5)
+cat("\n--- CFA (No Q5) ---\n")
+cfa_model_noQ5 <- '
+  PSS =~ Q1 + Q2 + Q3 + Q4 + Q6
+  PSI =~ Q7 + Q8 + Q9 + Q10 + Q11 + Q12
+  PSP =~ Q13 + Q14 + Q15 + Q16 + Q17 + Q18
+'
+fit_noQ5 <- cfa(cfa_model_noQ5, data = data_cfa_noQ5)
+summary(fit_noQ5, fit.measures = TRUE, standardized = TRUE)
+
+semPaths(
+  fit_noQ5,
+  what = "std",
+  layout = "circle2",
+  residuals = TRUE,
+  edge.color = "black",
+  edge.label.cex = 0.8,
+  label.cex = 1.2,
+  style = "ram",
+  exoCov = TRUE,
+  rotation = 3
+)
+
+## 3D. EGA (No Q5, walktrap)
+cat("\n--- EGA (No Q5, walktrap) ---\n")
+ega_result_noQ5 <- EGA(
+  data = data_cfa_noQ5,
+  model = "glasso",
+  algorithm = "walktrap",
+  plot.EGA = FALSE
+)
+print(ega_result_noQ5)
+plot(ega_result_noQ5, plot.type = "qgraph", title = "EGA Network (No Q5)", legend = TRUE)
+
+## 3E. bootEGA (No Q5, walktrap)
+cat("\n--- bootEGA (No Q5, walktrap) ---\n")
+set.seed(123)
+boot_ega_result_noQ5 <- bootEGA(
+  data = data_cfa_noQ5,
+  iter = 1000,
+  type = "parametric",
+  ncores = 1,
+  seed = 123,
+  typicalStructure = TRUE,
+  algorithm = "walktrap"
+)
+print(boot_ega_result_noQ5)
+cat("\n--- bootEGA Dimensions (No Q5) ---\n")
+print(boot_ega_result_noQ5$boot.ndim)
+cat("\n--- bootEGA Summary Table (No Q5) ---\n")
+print(boot_ega_result_noQ5$summary.table)
+cat("\n--- bootEGA Dimension Frequency (No Q5) ---\n")
+print(boot_ega_result_noQ5$frequency)
+
+if(!is.null(boot_ega_result_noQ5$typicalStructure)) {
+  plot(boot_ega_result_noQ5, type = "typical", title = "Typical Structure (No Q5)")
 }
 
-cat("\n--- End of Essential Analysis Script ---\n")
-
-# 1. Run EGA to estimate the number of dimensions and the network
-ega_result <- EGA(
-  data_cfa,
-  model = "glasso",     # or "TMFG"
-  plot.EGA = FALSE      # We'll plot after capturing the result
-)
-
-# 2. Plot the network found by EGA
-plot(ega_result, plot.type = "qgraph")
-
-# (Optional) Print EGA summary
-print(ega_result)
+cat("\n--- END OF SCRIPT ---\n")
